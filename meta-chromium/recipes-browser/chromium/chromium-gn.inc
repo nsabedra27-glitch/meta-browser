@@ -4,11 +4,15 @@ require gn-utils.inc
 
 GTKIC_VERSION = "${@bb.utils.contains('PACKAGECONFIG', 'gtk4', '4', '3',d)}"
 
-inherit features_check gtk-icon-cache qemu rust-common
+inherit features_check pkgconfig gtk-icon-cache qemu rust-common
 
 # The actual directory name in out/ is irrelevant for GN.
 OUTPUT_DIR = "out/Release"
 B = "${S}/${OUTPUT_DIR}"
+
+def rust_is_newer_than_190(d):
+    rustver = d.getVar('RUSTVERSION').split('.')
+    return int(rustver[0]) > 1 or (int(rustver[0]) == 1 and int(rustver[1]) > 90)
 
 # Backported patches.
 # None currently \o/
@@ -20,28 +24,18 @@ SRC_URI += "\
     file://0003-wrapper-extra-flags.patch \
     file://0004-Delete-compiler-options-not-available-in-release-ver.patch \
     file://0005-avoid-link-latomic-failure-on-CentOS-8-host.patch \
-    file://0006-Don-t-pass-unknown-LLVM-options.patch \
     file://0007-Fix-constexpr-variable-must-be-initialized-by-a-cons.patch \
-    file://0008-Use-the-correct-path-to-libclang_rt.builtins.a.patch \
     file://0009-Adjust-the-Rust-build-to-our-needs.patch \
     file://0010-Don-t-require-profiler_builtins.rlib.patch \
-    file://0011-Revert-Allow-and-use-std-hardware_destructive_interf.patch \
-    file://0012-Revert-Set-Rust-symbol-visibility-to-hidden-when-C-s.patch \
-    file://0013-pdfium-Fix-missing-PDFiumAPIStringBufferAdapter-temp.patch \
-    file://0014-Revert-Remove-libavif-based-AVIF-decoder.patch \
-    file://0015-Revert-Remove-third_party-libavif.patch \
-    file://0016-Disable-crabbyavif-to-fix-build-errors.patch \
-    file://0017-rust-Use-adler-instead-of-adler2.patch \
-    file://0018-third_party-node-update_node_binaries-Update-nodejs-.patch \
+    file://0011-fix-check_version-Only-compare-node.js-major-version.patch \
+    file://0012-chromium-fix-v4l2-compiler-error-on-arm.patch \
+    file://0013-Reduce-minimum-browser-window-width-to-480px.patch \
+    file://0001-Fix-building-gpu_host_impl.cc-on-Linux.patch \
+    ${@ '' if rust_is_newer_than_190(d) else 'file://chromium-142-crabbyavif-rust18x.patch'} \
+    file://fix-SYS_SECCOMP-redefinition.patch \
+    file://use-adler2.patch \
+    file://chromium-145-zip_ffi_glue-use-edition2024.patch \
 "
-
-# Missing third_party sources.
-SRC_URI += "\
-    git://chromium.googlesource.com/external/github.com/AOMediaCodec/libavif;protocol=https;branch=main;name=libavif;destsuffix=third_party/libavif/src \
-"
-
-SRCREV_FORMAT .= "_libavif"
-SRCREV_libavif = "e7b34a1f5e9f7024d08311c7bae156061b889882"
 
 # ARM/AArch64-specific patches.
 SRC_URI:append:aarch64 = "${@bb.utils.contains('TUNE_FEATURES', 'crypto', '', ' file://arm/0001-Fix-AES-crypto-SIGILL-on-rpi4-64.patch', d)}"
@@ -55,14 +49,12 @@ SRC_URI:append:libc-musl = "\
     file://musl/0005-__libc_malloc-is-internal-to-glibc.patch \
     file://musl/0006-debug-Fix-build-with-musl.patch \
     file://musl/0007-mallopt-is-glibc-specific-API.patch \
-    file://musl/0008-Use-monotonic-clock-for-pthread_cond_timedwait-with-.patch \
     file://musl/0009-Fix-tab-crashes-on-musl.patch \
     file://musl/0010-pthread_getname_np.patch \
     file://musl/0011-sys-stat.patch \
     file://musl/0012-credentials-header.patch \
     file://musl/0013-fstatat64.patch \
     file://musl/0014-no-res-ninit-nclose.patch \
-    file://musl/0015-fix-libc-version-include.patch \
 "
 
 ANY_OF_DISTRO_FEATURES = "opengl vulkan"
@@ -89,6 +81,7 @@ DEPENDS += " \
     libwebp \
     libxkbcommon \
     libxslt \
+    lld-native \
     ninja-native \
     nodejs-native \
     nspr \
@@ -97,13 +90,12 @@ DEPENDS += " \
     nss-native \
     pango \
     pciutils \
-    pkgconfig-native \
     ${@bb.utils.contains('DISTRO_FEATURES', 'pulseaudio', 'pulseaudio', '', d)} \
     qemu-native \
     rust-native \
     virtual/libgl \
 "
-DEPENDS:append:runtime-llvm = " compiler-rt compiler-rt-native libcxx-native"
+DEPENDS:append = " compiler-rt compiler-rt-native libcxx-native"
 DEPENDS:append:libc-musl = " libexecinfo"
 
 LDFLAGS:append:libc-musl = " -lexecinfo"
@@ -136,10 +128,10 @@ PACKAGECONFIG[use-egl] = ",,virtual/egl virtual/libgles2"
 # be necessary but are OK to add).
 PACKAGECONFIG[component-build] = ""
 
-# Starting with M61, Chromium defaults to building with its own copy of libc++
-# instead of the system's libstdc++. Add a knob to control this behavior
-# https://groups.google.com/a/chromium.org/d/msg/chromium-packagers/8aYO3me2SCE/SZ8pJXhZAwAJ
-PACKAGECONFIG[custom-libcxx] = "use_custom_libcxx=true,use_custom_libcxx=false,,"
+#  As of Chromium 138, libc++ is required unconditionally.
+# https://docs.google.com/document/d/193ig0qeM23rK1yH6bW14O3zIgVztyKaY4R1XRwgmUFk/edit?usp=sharing
+# Force use_custom_libcxx=true as Chromium 138+ requires libc++
+GN_ARGS += "use_custom_libcxx=true"
 
 PACKAGECONFIG[cups] = "use_cups=true,use_cups=false,cups"
 PACKAGECONFIG[gtk4] = ""
@@ -206,32 +198,17 @@ GN_ARGS += "use_lld=true use_gold=false"
 # file and other utilities are unable to read a 32-bit binary this size, which
 # causes it not to be stripped.
 # The solution is two-fold:
-# 1. Make sure -g is not passed on 32-bit architectures via DEBUG_FLAGS. -g is
-#    the same as -g2. -g1 generates an 800MB binary, which is a lot more
-#    manageable.
+# 1. Set DEBUG_LEVELFLAG as needed, which is used in both FULL_OPTIMIZATION
+#    and DEBUG_OPTIMIZATION.
 # 2. Explicitly pass symbol_level=0 to GN. This causes -g0 to be passed
 #    instead, so that if DEBUG_BUILD is not set GN will not create a huge debug
 #    binary anyway. Since our compiler flags are passed after GN's, -g0 does
 #    not cause any issues if DEBUG_BUILD is set, as -g1 will be passed later.
-DEBUG_FLAGS:remove:arm = "-g"
-DEBUG_FLAGS:append:arm = "-g1"
-DEBUG_FLAGS:remove:x86 = "-g"
-DEBUG_FLAGS:append:x86 = "-g1"
+DEBUG_LEVELFLAG = "-g1"
+# For ARM builds, completely remove debug flags that cause binary size issues
+# This prevents the "output file too large" linker error on ARM32
+DEBUG_LEVELFLAG:arm = ""
 GN_ARGS += "symbol_level=0"
-
-# As of Chromium 62.0.3202.94 and Yocto Rocko (GCC 7, binutils 2.29), passing
-# -g to the compiler results in many linker errors on aarch64, such as:
-# obj/third_party/WebKit/Source/modules/payments/libpayments.a(PaymentEventDataConversion.o)(.debug_loc+0x4e25): error: relocation overflow in R_AARCH64_ABS32
-DEBUG_FLAGS:remove:aarch64 = "-g"
-DEBUG_FLAGS:append:aarch64 = "-g1"
-
-# As of Chromium 60.0.3112.101 and Yocto Pyro (GCC 6, binutils 2.28), passing
-# -g to the compiler results in many linker errors on x86_64, such as:
-# obj/third_party/WebKit/Source/core/loader/libloader.a(ModuleTreeLinker.o)(.debug_loc+0x1e9a5): error: relocation overflow: reference to local symbol 82 in obj/third_party/WebKit/Source/core/loader/libloader.a(ModuleTreeLinker.o)
-# obj/third_party/WebKit/Source/core/libcore_generated.a(ScriptModule.o)(.debug_loc+0x253c): error: relocation overflow: reference to local symbol 31 in obj/third_party/WebKit/Source/core/libcore_generated.a(ScriptModule.o)
-# so we have to use the same hack described above.
-DEBUG_FLAGS:remove:x86-64 = "-g"
-DEBUG_FLAGS:append:x86-64 = "-g1"
 
 # Disable Chrome Remote Desktop (aka Chromoting) support. Building host support
 # (so that the machine running this recipe can be controlled remotely from
@@ -271,6 +248,19 @@ GN_ARGS += "disable_fieldtrial_testing_config=true"
 # See https://crrev.com/c/2424669
 GN_ARGS += "chrome_pgo_phase=0"
 
+# Disable Dawn
+# It fails with:
+# ../../components/viz/host/gpu_host_impl.cc:109:30: error: expected ';' after return statement
+#   109 |   return SKIA_COMMIT_HASH "_" DAWN_COMMIT_HASH;
+#       |                              ^
+#       |                              ;
+# 1 error generated
+GN_ARGS += "skia_use_dawn=false"
+
+# Disable passing --warning-suppression-mappings= flag to clang.
+# This feature is available on Clang21+
+GN_ARGS += "clang_warning_suppression_file="""
+
 # API keys for accessing Google services. By default, we use an invalid key
 # only to prevent the "you are missing an API key" infobar from being shown on
 # startup.
@@ -287,9 +277,12 @@ GN_ARGS += ' \
 '
 
 # Use libcxx headers for native parts
-BUILD_CPPFLAGS:append:runtime-llvm = " -isysroot=${STAGING_DIR_NATIVE} -stdlib=libc++"
+BUILD_CPPFLAGS:append = " -isysroot=${STAGING_DIR_NATIVE} -stdlib=libc++"
 # Use libgcc for native parts
-BUILD_LDFLAGS:append:runtime-llvm = " -rtlib=libgcc -unwindlib=libgcc -stdlib=libc++ -lc++abi -rpath ${STAGING_LIBDIR_NATIVE}"
+BUILD_LDFLAGS:append = " -rtlib=libgcc -unwindlib=libgcc -stdlib=libc++ -lc++abi -rpath ${STAGING_LIBDIR_NATIVE}"
+LDFLAGS:append = " --target=${TARGET_SYS}"
+CXXFLAGS:append = " --target=${TARGET_SYS} -nostdlib++"
+CFLAGS:append = " --target=${TARGET_SYS}"
 
 # Toolchains we will use for the build. We need to point to the toolchain file
 # we've created, set the right target architecture and make sure we are not
@@ -357,15 +350,16 @@ ARM_VERSION:armv6 = "6"
 # overriding what GN wants
 TUNE_CCARGS:remove = "-mthumb"
 
+# Linking rust with partitionalloc is problematic in arm32
 GN_ARGS:append:arm = ' \
         arm_float_abi="${ARM_FLOAT_ABI}" \
         arm_fpu="${ARM_FPU}" \
         arm_tune="${ARM_TUNE}" \
         arm_version=${ARM_VERSION} \
+        use_partition_alloc_as_malloc=false \
+        enable_backup_ref_ptr_support=false \
 '
-# tcmalloc's atomicops-internals-arm-v6plus.h uses the "dmb" instruction that
-# is not available on (some?) ARMv6 models, which causes the build to fail.
-GN_ARGS:append:armv6 = ' use_partition_alloc_as_malloc=false enable_backup_ref_ptr_support=false'
+
 # The WebRTC code fails to build on ARMv6 when NEON is enabled.
 # https://bugs.chromium.org/p/webrtc/issues/detail?id=6574
 GN_ARGS:append:armv6 = ' arm_use_neon=false'
@@ -410,26 +404,6 @@ python do_create_v8_qemu_wrapper () {
 do_create_v8_qemu_wrapper[dirs] = "${B}"
 addtask create_v8_qemu_wrapper after do_patch before do_configure
 
-# Check the LLVMVERSION defined in the meta-clang layer. Given Chromium is
-# developed using new C++ features, the LLVMVERSION has to be >= 14. Otherwise,
-# it is not guaranteed that Chromium will compile.
-python do_check_llvm_version () {
-  from distutils.version import LooseVersion
-
-  min_llvm_version = "14.0.0"
-  llvm_version = d.getVar('LLVMVERSION', False)
-  if not llvm_version:
-    bb.warn("Unable to determine LLVM version. Chromium may not be compiled "
-            "successfully if the LLVM version is below %s." % min_llvm_version)
-    return
-
-  if LooseVersion(llvm_version) < LooseVersion(min_llvm_version):
-    bb.fatal("Your LLVMVERSION (%s) is lower than the minimum required "
-             "LLVMVERSION (%s). If you are using dunfell, make sure you "
-             "use dunfell-clang14 branch." % (llvm_version, min_llvm_version))
-}
-addtask check_llvm_version before do_configure
-
 python do_write_toolchain_file () {
     """Writes a BUILD.gn file for Yocto detailing its toolchains."""
     toolchain_dir = d.expand("${S}/build/toolchain/yocto")
@@ -437,6 +411,7 @@ python do_write_toolchain_file () {
     toolchain_file = os.path.join(toolchain_dir, "BUILD.gn")
     write_toolchain_file(d, toolchain_file)
 }
+
 addtask write_toolchain_file after do_patch before do_configure
 
 do_add_nodejs_symlink () {
@@ -458,29 +433,78 @@ do_add_clang_latest () {
     # directory that is a copy of /usr/lib/clang/$CLANG_VERSION. Chromium
     # manually links against libclang_rt.builtins.a and uses the `clang_version`
     # GN variable to find it. This allows us to set it to the same value for all
-    # Yocto releases.
+    # Yocto releases. Also copy headers so bindgen can find system headers.
     cd "${STAGING_LIBDIR_NATIVE}/clang"
     rm -rf latest
-    # find the directory containing the library
+
+    # Find a directory with runtime libraries and copy it as base
     for dir in *; do
-        if [ -n "$(find $dir -name 'libclang_rt.builtins*')" ] ; then
+        if [ -d "$dir" ] && [ -n "$(find $dir -name 'libclang_rt.builtins*' 2>/dev/null)" ]; then
+            echo "Copying clang directory $dir to latest (runtime libraries)"
             cp -r "$dir" latest
             break
         fi
     done
+
+    # Find and copy headers from any versioned directory to ensure bindgen can find them
+    headers_copied=false
+    for dir in *; do
+        if [ -d "$dir/include" ]; then
+            echo "Found headers in $dir/include, copying to latest/include"
+            mkdir -p latest/include
+            cp -r "$dir/include/"* latest/include/
+            headers_copied=true
+            break
+        fi
+    done
+
+    if [ "$headers_copied" = false ]; then
+        echo "Warning: No Clang headers found in any versioned directories"
+    fi
 }
 addtask add_clang_latest after do_configure before do_compile
 
 do_copy_clang_library () {
-    # Chromium needs to link against libclang_rt.builtins.a for both host and
-    # target code, and expects to find both libraries in the same directory
-    # (thanks to 0008-Use-the-correct-path-to-libclang_rt.builtins.a.patch).
-    cd "${STAGING_DIR_HOST}${nonarch_libdir}/clang"
-    # lib_file = "./$CLANG_VERSION/lib/linux/libclang_rt.builtins-$ARCH.a"
-    lib_file="$(find . -name 'libclang_rt.builtins*')"
-    # stripped_lib_file = "lib/linux/libclang_rt.builtins-$ARCH.a"
-    stripped_lib_file="${lib_file#*/*/}"
-    cp "$lib_file" "${STAGING_LIBDIR_NATIVE}/clang/latest/${stripped_lib_file}"
+    cp -r "${STAGING_LIBDIR_NATIVE}/clang/latest" "${STAGING_DIR_HOST}${nonarch_libdir}/clang/"
+    cd "${STAGING_DIR_HOST}${nonarch_libdir}/clang" || return
+
+    lib_file=$(find $(find . -maxdepth 1 \! \( -name latest -o -name '.' \)) \( -name "libclang_rt.builtins-*" -o -name "liborc_rt-*" \))
+    echo "lib_file = $lib_file"
+    export CHROMIUM_TARGET_TRIPLET="$(echo ${RUST_TARGET_SYS} | sed 's:${TARGET_VENDOR}-:-unknown-:')"
+
+    mkdir -p "latest/lib/${CHROMIUM_TARGET_TRIPLET}"
+    echo "Executing cp $lib_file latest/lib/${CHROMIUM_TARGET_TRIPLET}/"
+    cp $lib_file "latest/lib/${CHROMIUM_TARGET_TRIPLET}/"
+    cd "latest/lib/${CHROMIUM_TARGET_TRIPLET}/" || return
+
+    for file in *-"${TARGET_ARCH}".a *-"${TARGET_ARCH}hf".a; do
+        if [ -f "$file" ]; then
+            new_name=$(echo "$file" | sed -e "s/-${TARGET_ARCH}hf//" -e "s/-${TARGET_ARCH}//")
+            mv "$file" "$new_name"
+        fi
+    done
+
+    native_arch_path="${STAGING_LIBDIR_NATIVE}/clang/latest/lib/${CHROMIUM_TARGET_TRIPLET}/"
+    mkdir -p "$native_arch_path"
+    echo "Executing cp -r $(ls -d *) $native_arch_path"
+    cp -r * "$native_arch_path"
+
+    if [ "${TARGET_ARCH}" != "${BUILD_ARCH}" ]; then
+        export CHROMIUM_BUILD_TRIPLET="$(echo ${RUST_BUILD_SYS} | sed 's:${HOST_VENDOR}-:-unknown-:')"
+        cd "${STAGING_LIBDIR_NATIVE}/clang"
+        if [ -d "latest/lib/linux" ]; then
+            rm -rf "latest/lib/${CHROMIUM_BUILD_TRIPLET}"
+            cp -ar latest/lib/linux "latest/lib/${CHROMIUM_BUILD_TRIPLET}"
+        fi
+        cd "latest/lib/${CHROMIUM_BUILD_TRIPLET}"
+
+        for file in *-"${BUILD_ARCH}".a *-"${BUILD_ARCH}hf".a; do
+            if [ -f "$file" ]; then
+                new_name=$(echo "$file" | sed -e "s/-${BUILD_ARCH}hf//" -e "s/-${BUILD_ARCH}//")
+                mv "$file" "$new_name"
+            fi
+        done
+    fi
 }
 addtask copy_clang_library after do_add_clang_latest before do_compile
 
@@ -492,15 +516,22 @@ do_copy_target_rustlibs () {
 }
 addtask copy_target_rustlibs after do_configure before do_compile
 
-do_copy_missing_third_party_sources () {
-	rm -rf ${S}/third_party/libavif/src
-	cp -r ${UNPACKDIR}/third_party/libavif/src/ ${S}/third_party/libavif/
-}
-addtask copy_missing_third_party_sources after do_patch before do_configure
-
 do_configure() {
 	cd ${S}
+
+	# Fix potential failure for the NodeJS version check.
+	# Chromium is tested against a specific NodeJS version but it works
+	# with slightly older versions, too.
+	NODE_VERSION=$(node -v)
+	sed -i s/^NODE_VERSION=.*/NODE_VERSION=\"$NODE_VERSION\"/g third_party/node/update_node_binaries
+
 	python3 ./build/linux/unbundle/replace_gn_files.py --system-libraries ${GN_UNBUNDLE_LIBS}
+
+	# Add Rust-style target triples (converted by Yocto's rust-common.bbclass)
+	grep -qxF "${RUST_TARGET_SYS}" ${S}/build/rust/known-target-triples.txt || echo "${RUST_TARGET_SYS}" >> ${S}/build/rust/known-target-triples.txt
+	grep -qxF "${RUST_HOST_SYS}" ${S}/build/rust/known-target-triples.txt || echo "${RUST_HOST_SYS}" >> ${S}/build/rust/known-target-triples.txt
+	grep -qxF "${RUST_BUILD_SYS}" ${S}/build/rust/known-target-triples.txt || echo "${RUST_BUILD_SYS}" >> ${S}/build/rust/known-target-triples.txt
+
 	gn gen --args='${GN_ARGS}' "${OUTPUT_DIR}"
 }
 
@@ -617,4 +648,4 @@ ALLOW_EMPTY:${PN}-dev = "0"
 
 # ERROR: QA Issue: lib32-chromium-ozone-wayland: ELF binary /usr/bin/chromium has relocations in .text [textrel]
 INSANE_SKIP:${PN}:append:x86 = "textrel"
-
+INSANE_SKIP:${PN}-dbg:append = "buildpaths"
